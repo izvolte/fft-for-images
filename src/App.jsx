@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import React, { useState, useRef } from "react";
 
 function App() {
     // Состояния для размеров, FFT-данных, порога и информации о компрессии
@@ -16,6 +16,7 @@ function App() {
     const originalCanvasRef = useRef(null);
     const spectrumCanvasRef = useRef(null);
     const reconstructedCanvasRef = useRef(null);
+    const wavesSumCanvasRef = useRef(null); // для анимации суммы волн
 
     // Функция для вычисления следующей степени двойки
     const nextPowerOfTwo = (n) => Math.pow(2, Math.ceil(Math.log2(n)));
@@ -57,14 +58,12 @@ function App() {
 
     // --- 2D FFT (сначала по строкам, затем по столбцам) ---
     const fft2d = (matrix) => {
-        const N = matrix.length; // число строк
-        const M = matrix[0].length; // число столбцов
+        const N = matrix.length;
+        const M = matrix[0].length;
         let result = new Array(N);
-        // FFT по строкам
         for (let i = 0; i < N; i++) {
             result[i] = fft1d(matrix[i]);
         }
-        // FFT по столбцам
         for (let j = 0; j < M; j++) {
             let col = new Array(N);
             for (let i = 0; i < N; i++) {
@@ -143,11 +142,11 @@ function App() {
     };
 
     // --- Отрисовка восстановленного изображения (обрезается до исходного размера) ---
-    const drawReconstructedImage = (rMatrix, gMatrix, bMatrix) => {
-        if (!reconstructedCanvasRef.current) return;
-        reconstructedCanvasRef.current.width = width;
-        reconstructedCanvasRef.current.height = height;
-        const ctx = reconstructedCanvasRef.current.getContext("2d");
+    const drawReconstructedImage = (rMatrix, gMatrix, bMatrix, targetCanvas) => {
+        if (!targetCanvas) return;
+        targetCanvas.width = width;
+        targetCanvas.height = height;
+        const ctx = targetCanvas.getContext("2d");
         const imgData = ctx.createImageData(width, height);
         for (let i = 0; i < height; i++) {
             for (let j = 0; j < width; j++) {
@@ -241,9 +240,8 @@ function App() {
                 if (mag > maxMag) maxMag = mag;
             }
         }
-        // Вводим масштаб: чем больше thresholdScale, тем ниже T
+        // Масштабирование порога: чем больше thresholdScale, тем ниже T
         const thresholdScale = 1000;
-        // Если thresholdPercent == 0, T = 0 (без подавления)
         const T = thresholdPercent === 0 ? 0 : (thresholdPercent / 100) * (maxMag / thresholdScale);
         let newFft = new Array(H);
         let preservedCount = 0;
@@ -273,7 +271,9 @@ function App() {
             const compG = applySoftThreshold(fftData.G, val);
             const compB = applySoftThreshold(fftData.B, val);
             setCompressedFftData({ R: compR.newFft, G: compG.newFft, B: compB.newFft });
-            const preserved = Math.round((compR.effectiveCount + compG.effectiveCount + compB.effectiveCount) / 3);
+            const preserved = Math.round(
+                (compR.effectiveCount + compG.effectiveCount + compB.effectiveCount) / 3
+            );
             const total = compR.total;
             const compressionRatio = (((total - preserved) / total) * 100).toFixed(2);
             setCompressionInfo(
@@ -299,9 +299,63 @@ function App() {
                 croppedB.push(ifftB[i].slice(0, width));
             }
             setReconstructedData({ R: croppedR, G: croppedG, B: croppedB });
-            drawReconstructedImage(croppedR, croppedG, croppedB);
+            drawReconstructedImage(croppedR, croppedG, croppedB, reconstructedCanvasRef.current);
         }
+    };// --- Анимация восстановления в 4 этапа с заданными процентами ---
+    const animateReconstruction = () => {
+        if (!compressedFftData) return;
+        const totalCoeffs = paddedWidth * paddedHeight;
+        // Задаем этапы как доли от общего числа коэффициентов
+        const steps = [0.05, 0.10, 0.20, 1.0]; // 5%, 10%, 20%, 100%
+        const delay = 1000; // задержка 1000 мс (1 секунда) между этапами
+        let currentStep = 0;
+
+        const animateStep = () => {
+            const percent = steps[currentStep];
+            const currentIndex = Math.floor(percent * totalCoeffs);
+
+            // Функция формирования частичного FFT для одного канала:
+            const partialFftChannel = (channel) => {
+                const newMatrix = [];
+                let idx = 0;
+                for (let i = 0; i < channel.length; i++) {
+                    newMatrix[i] = [];
+                    for (let j = 0; j < channel[0].length; j++) {
+                        newMatrix[i][j] = idx < currentIndex ? channel[i][j] : { re: 0, im: 0 };
+                        idx++;
+                    }
+                }
+                return newMatrix;
+            };
+
+            const partialR = partialFftChannel(compressedFftData.R);
+            const partialG = partialFftChannel(compressedFftData.G);
+            const partialB = partialFftChannel(compressedFftData.B);
+
+            const ifftR = ifft2d(partialR);
+            const ifftG = ifft2d(partialG);
+            const ifftB = ifft2d(partialB);
+
+            let croppedR = [];
+            let croppedG = [];
+            let croppedB = [];
+            for (let i = 0; i < height; i++) {
+                croppedR.push(ifftR[i].slice(0, width));
+                croppedG.push(ifftG[i].slice(0, width));
+                croppedB.push(ifftB[i].slice(0, width));
+            }
+            // Отрисовываем промежуточное восстановленное изображение на канвасе wavesSumCanvasRef
+            drawReconstructedImage(croppedR, croppedG, croppedB, wavesSumCanvasRef.current);
+
+            currentStep++;
+            if (currentStep < steps.length) {
+                setTimeout(animateStep, delay);
+            }
+        };
+
+        animateStep();
     };
+
 
     return (
         <div style={{ fontFamily: "sans-serif", padding: "20px" }}>
@@ -333,8 +387,19 @@ function App() {
                 <button onClick={handleInverseTransform}>Обратное преобразование</button>
             </div>
             <div style={{ marginTop: "20px" }}>
-                <h3>Восстановленное изображение</h3>
-                <canvas ref={reconstructedCanvasRef} style={{ border: "1px solid black" }}></canvas>
+                <button onClick={animateReconstruction}>
+                    Анимировать восстановление (4 этапа)
+                </button>
+            </div>
+            <div style={{ display: "flex", marginTop: "20px" }}>
+                <div style={{ marginRight: "20px" }}>
+                    <h3>Восстановленное изображение</h3>
+                    <canvas ref={reconstructedCanvasRef} style={{ border: "1px solid black" }}></canvas>
+                </div>
+                <div>
+                    <h3>Анимация суммы волн</h3>
+                    <canvas ref={wavesSumCanvasRef} style={{ border: "1px solid black" }}></canvas>
+                </div>
             </div>
         </div>
     );
